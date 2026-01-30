@@ -1,201 +1,177 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
+import os
+import sys
 from datetime import datetime
 
-from agent import evaluate_digital_maturity
-from recommendations import get_recommendations
-from pdf_utils import generate_pdf
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
 
-st.set_page_config(
-    page_title="Procjena digitalne zrelosti",
-    layout="wide"
-)
-# ================= TEMA =================
-tema = st.sidebar.radio("Tema prikaza", ["Svijetla", "Tamna"])
+# Ensure project root is on sys.path so backend imports work on macOS/Streamlit
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-if tema == "Tamna":
-    bg = "#0e1117"
-    fg = "#ffffff"
-    card = "#161b22"
+from backend.analysis import load_dataset, preprocess, detect_anomalies
+
+# -------------------------
+# Page
+# -------------------------
+st.set_page_config(page_title="UNSW-NB15 • Early Anomaly Dashboard", layout="wide")
+st.title("UNSW-NB15 • Early Anomaly Detection Dashboard")
+st.caption("Interaktivna vizuelna analiza ranih anomalija (prag: mean + k·std)")
+
+DATA_PATH = os.path.join("data", "UNSW_NB15_training-set.csv")
+OUTPUT_DIR = "outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# -------------------------
+# Load
+# -------------------------
+if not os.path.exists(DATA_PATH):
+    st.error(f"Dataset nije pronađen: {DATA_PATH}")
+    st.info("Provjeri da li je fajl u folderu data/ unutar projekta.")
+    st.stop()
+
+df_raw = load_dataset(DATA_PATH)
+df_num = preprocess(df_raw)
+
+# -------------------------
+# Sidebar
+# -------------------------
+st.sidebar.header("Kontrole")
+numeric_cols = list(df_num.columns)
+
+preferred = [c for c in ["dur", "sbytes", "dbytes", "spkts", "dpkts", "pkts"] if c in numeric_cols]
+default_metric = preferred[0] if preferred else numeric_cols[0]
+
+metric = st.sidebar.selectbox("Izaberi metriku", options=numeric_cols, index=numeric_cols.index(default_metric))
+k = st.sidebar.slider("Osjetljivost (k)", 1.0, 5.0, 2.5, 0.1)
+
+# -------------------------
+# Detect
+# -------------------------
+res = detect_anomalies(df_num, metric, k=k)
+
+anomaly_count = int(res["anomaly"].sum())
+total = int(len(res))
+anom_pct = (anomaly_count / total * 100) if total else 0.0
+
+mean = float(res["mean"].iloc[0])
+std = float(res["std"].iloc[0])
+threshold = float(res["threshold"].iloc[0])
+
+# -------------------------
+# KPIs
+# -------------------------
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Mean", f"{mean:.3f}")
+c2.metric("Std", f"{std:.3f}")
+c3.metric("Threshold", f"{threshold:.3f}")
+c4.metric("Anomalije", f"{anomaly_count} ({anom_pct:.2f}%)")
+
+if anomaly_count > 0:
+    st.error("⚠️ Detektovane rane anomalije za izabranu metriku i k.")
 else:
-    bg = "#ffffff"
-    fg = "#212529"
-    card = "#f8f9fa"
+    st.success("✅ Nema detektovanih anomalija za izabranu metriku i k.")
 
-st.markdown(f"""
-<style>
-body {{
-    background-color: {bg};
-    color: {fg};
-}}
-.card {{
-    background-color: {card};
-    padding: 1.2rem;
-    border-radius: 12px;
-    margin-bottom: 1rem;
-}}
-</style>
-""", unsafe_allow_html=True)
-# ================= NAVIGACIJA =================
-stranica = st.sidebar.selectbox(
-    "Navigacija",
-    ["Procjena", "Metodologija"]
-)
-if stranica == "Metodologija":
-    st.title("Metodologija procjene digitalne zrelosti")
+# -------------------------
+# Main plots
+# -------------------------
+st.subheader(f"Vizuelizacija metrike: {metric}")
 
-    st.markdown("""
-    Ova aplikacija koristi **model digitalne zrelosti zasnovan na sposobnostima**.
+y = res["metric_value"].values
+anom_idx = np.where(res["anomaly"].values)[0]
 
-    ### Dimenzije procjene
-    - IT infrastruktura  
-    - Procesna digitalizacija  
-    - Podaci i analitika  
-    - Cyber bezbjednost  
-    - Digitalne kompetencije  
+fig1, ax1 = plt.subplots(figsize=(10, 4))
+ax1.plot(y, label="Vrijednost")
+ax1.axhline(threshold, color="red", linestyle="--", label=f"Threshold = {threshold:.3f}")
+if len(anom_idx) > 0:
+    ax1.scatter(anom_idx, y[anom_idx], s=10, color="red", label="Anomalije")
+ax1.set_xlabel("Uzorci")
+ax1.set_ylabel(metric)
+ax1.legend()
+st.pyplot(fig1)
 
-    ### Skala ocjenjivanja
-    1 – Ne postoji / ad-hoc  
-    2 – Djelimično implementirano  
-    3 – Implementirano, ali nekonzistentno  
-    4 – Standardizovano i mjerljivo  
-    5 – Optimizovano i kontinuirano unapređivano  
+fig2, ax2 = plt.subplots(figsize=(10, 4))
+ax2.hist(y, bins=60)
+ax2.axvline(threshold, color="red", linestyle="--")
+ax2.set_xlabel(metric)
+ax2.set_ylabel("Frekvencija")
+ax2.set_title("Distribucija vrijednosti (histogram) + prag")
+st.pyplot(fig2)
 
-    ### Izračunavanje indeksa
-    - Ocjena dimenzije = prosjek pitanja  
-    - Konačni indeks = težinski zbir dimenzija  
+# -------------------------
+# Table + filters
+# -------------------------
+st.divider()
+st.subheader("Pregled anomalija (Top N)")
 
-    Cyber bezbjednost ima veću težinu zbog svoje ključne uloge u digitalnoj otpornosti.
+show_mode = st.radio("Prikaz", ["Svi uzorci", "Samo anomalije", "Samo normalni"], horizontal=True)
 
-    ### Izlaz
-    - Indeks digitalne zrelosti  
-    - Radar dijagram  
-    - Histogrami po dimenzijama  
-    - PDF izvještaj  
-    """)
-if stranica == "Procjena":
+view_df = df_raw.copy()
+view_df["_metric"] = pd.to_numeric(df_raw[metric], errors="coerce")
+view_df["_anomaly"] = res["anomaly"].values
+view_df["_severity"] = res["severity"].values
 
-    st.title("Procjena digitalne zrelosti kompanije")
-    st.write("Popunite upitnik kako biste dobili objektivnu procjenu digitalne zrelosti.")
+if show_mode == "Samo anomalije":
+    view_df = view_df[view_df["_anomaly"] == True]
+elif show_mode == "Samo normalni":
+    view_df = view_df[view_df["_anomaly"] == False]
 
-    naziv_kompanije = st.sidebar.text_input(
-        "Naziv kompanije",
-        placeholder="Unesite naziv kompanije"
+if view_df.empty:
+    if show_mode == "Samo anomalije":
+        st.info("ℹ️ Za izabranu metriku i k nema detektovanih anomalija.")
+    elif show_mode == "Samo normalni":
+        st.info("ℹ️ Svi prikazani uzorci pripadaju normalnom ponašanju.")
+    else:
+        st.info("ℹ️ Nema podataka za prikaz sa trenutnim postavkama.")
+else:
+    top_n = st.slider("Koliko redova prikazati", 10, 200, 50, 10)
+    view_sorted = view_df.sort_values(by="_severity", ascending=False).head(top_n)
+
+    preferred_cols = [
+        "srcip", "dstip", "sport", "dport", "proto", "service", "state",
+        "dur", "sbytes", "dbytes", "spkts", "dpkts", "sttl", "dttl",
+        "label", "attack_cat"
+    ]
+    cols_to_show = [c for c in preferred_cols if c in view_sorted.columns]
+    if not cols_to_show:
+        cols_to_show = list(view_sorted.columns)
+
+    st.dataframe(view_sorted[cols_to_show], use_container_width=True)
+
+# -------------------------
+# Download + export
+# -------------------------
+st.divider()
+st.subheader("Eksport (CSV/PNG) za IEEE članak")
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# CSV anomalies
+anom_only = df_raw.copy()
+anom_only["metric"] = metric
+anom_only["k"] = k
+anom_only["threshold"] = threshold
+anom_only["anomaly"] = res["anomaly"].values
+anom_only["severity"] = res["severity"].values
+anom_only = anom_only[anom_only["anomaly"] == True].sort_values(by="severity", ascending=False)
+
+if len(anom_only) == 0:
+    st.info("ℹ️ Nema anomalija za izabranu metriku i k — CSV export se ne prikazuje.")
+else:
+    csv_bytes = anom_only.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Preuzmi anomalije (CSV)",
+        data=csv_bytes,
+        file_name=f"unsw_nb15_anomalies_{metric}_k{k:.1f}.csv",
+        mime="text/csv",
     )
 
-    def pitanja(naslov, lista):
-        st.sidebar.subheader(naslov)
-        return [st.sidebar.radio(p, [1,2,3,4,5], horizontal=True) for p in lista]
-
-    it = pitanja("IT infrastruktura", [
-        "Centralizacija informacionih sistema",
-        "Skalabilnost IT infrastrukture",
-        "Pouzdanost mrežne infrastrukture",
-        "Standardizacija IT arhitekture",
-        "Postojanje IT razvojnog plana"
-    ])
-
-    pr = pitanja("Procesna digitalizacija", [
-        "Digitalna podrška procesima",
-        "Automatizacija toka podataka",
-        "Integrisanost sistema",
-        "Mjerenje performansi procesa",
-        "Kontinuirano unapređenje procesa"
-    ])
-
-    da = pitanja("Podaci i analitika", [
-        "Standardizacija podataka",
-        "Kvalitet i konzistentnost podataka",
-        "Operativna analitika",
-        "Strateška analitika",
-        "Data governance prakse"
-    ])
-
-    cy = pitanja("Cyber bezbjednost", [
-        "Formalizovane sigurnosne politike",
-        "Kontrola pristupa sistemima",
-        "Spremnost za incidente",
-        "Sigurnosna testiranja",
-        "Integracija bezbjednosti"
-    ])
-
-    sk = pitanja("Digitalne kompetencije", [
-        "Digitalna pismenost zaposlenih",
-        "Programi obuke",
-        "Spremnost za nove tehnologije",
-        "Upotreba digitalnih alata",
-        "Podrška menadžmenta"
-    ])
-    if st.sidebar.button("🔍 Pokreni procjenu"):
-
-        dimenzije = {
-            "IT infrastruktura": sum(it)/5,
-            "Procesna digitalizacija": sum(pr)/5,
-            "Podaci i analitika": sum(da)/5,
-            "Cyber bezbjednost": sum(cy)/5,
-            "Digitalne kompetencije": sum(sk)/5
-        }
-
-        indeks, nivo = evaluate_digital_maturity(dimenzije)
-
-        st.markdown(
-            f"<div class='card'><h2>Indeks digitalne zrelosti: {indeks}</h2><h3>{nivo}</h3></div>",
-            unsafe_allow_html=True
-        )
-
-        radar_df = pd.DataFrame({
-            "Dimenzija": list(dimenzije.keys()) + [list(dimenzije.keys())[0]],
-            "Vrijednost": list(dimenzije.values()) + [list(dimenzije.values())[0]]
-        })
-
-        fig = px.line_polar(
-            radar_df,
-            r="Vrijednost",
-            theta="Dimenzija",
-            line_close=True,
-            range_r=[0,5]
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.subheader("Detaljna analiza po dimenzijama")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("**IT infrastruktura**")
-            st.plotly_chart(px.histogram(it, nbins=5), use_container_width=True)
-
-        with col2:
-            st.markdown("**Procesna digitalizacija**")
-            st.plotly_chart(px.histogram(pr, nbins=5), use_container_width=True)
-
-        col3, col4 = st.columns(2)
-
-        with col3:
-            st.markdown("**Podaci i analitika**")
-            st.plotly_chart(px.histogram(da, nbins=5), use_container_width=True)
-
-        with col4:
-            st.markdown("**Cyber bezbjednost**")
-            st.plotly_chart(px.histogram(cy, nbins=5), use_container_width=True)
-
-        st.markdown("**Digitalne kompetencije**")
-        st.plotly_chart(px.histogram(sk, nbins=5), use_container_width=True)
-        st.subheader("Preporuke za unapređenje")
-        for r in get_recommendations(nivo):
-            st.write("-", r)
-
-        pdf_fajl = generate_pdf(
-            naziv_kompanije,
-            indeks,
-            nivo,
-            dimenzije
-        )
-
-        with open(pdf_fajl, "rb") as f:
-            st.download_button(
-                "📄 Preuzmi PDF izvještaj",
-                data=f,
-                file_name=pdf_fajl,
-                mime="application/pdf"
-            )
+# Save figures to outputs for paper
+png1 = os.path.join(OUTPUT_DIR, f"figure_metric_{metric}_k{k:.1f}_{timestamp}.png")
+png2 = os.path.join(OUTPUT_DIR, f"figure_hist_{metric}_k{k:.1f}_{timestamp}.png")
+fig1.savefig(png1, dpi=200, bbox_inches="tight")
+fig2.savefig(png2, dpi=200, bbox_inches="tight")
+st.success(f"PNG exportovan u: {png1} i {png2}")
